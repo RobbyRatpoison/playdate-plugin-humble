@@ -494,14 +494,18 @@ def _safe_dirname(name):
 
 
 def _run_download(appid, url, filename, game_dir):
-    os.makedirs(game_dir, exist_ok=True)
     dest = os.path.join(game_dir, filename)
     with _dl_lock:
         _dl_state[appid] = {'status': 'downloading', 'filename': filename, 'received': 0, 'total': 0, 'error': None}
     try:
+        from runners.installdir import check_writable
+        check_writable(game_dir)
         with requests.get(url, stream=True, timeout=30) as r:
             r.raise_for_status()
             total = int(r.headers.get('content-length', 0))
+            if total:
+                from runners.diskspace import check_disk_space
+                check_disk_space(game_dir, total)
             with _dl_lock:
                 _dl_state[appid]['total'] = total
             received = 0
@@ -723,7 +727,8 @@ def launch_game(appid):
         return {'status': 'installing', 'install_poller': 'humbleDownloadPoller',
                 'message': f'Already downloading {name}…'}
 
-    game_dir = os.path.join(HUMBLE_DOWNLOAD_DIR, _safe_dirname(name))
+    from runners.installdir import get_install_dir
+    game_dir = os.path.join(get_install_dir('humble', HUMBLE_DOWNLOAD_DIR), _safe_dirname(name))
     update_game_data(appid, install_path=game_dir)
     threading.Thread(target=_run_download, args=(appid, url, filename, game_dir), daemon=True).start()
     return {'status': 'installing', 'install_poller': 'humbleDownloadPoller',

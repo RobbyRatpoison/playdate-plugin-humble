@@ -17,8 +17,9 @@ class HumblePlugin:
     def on_startup(self):
         from .humble import HUMBLE_DOWNLOAD_DIR
         from .watcher import start_humble_watcher, sync_humble_install_status
+        from runners.installdir import get_install_dir
         sync_humble_install_status()
-        start_humble_watcher(HUMBLE_DOWNLOAD_DIR)
+        start_humble_watcher(get_install_dir('humble', HUMBLE_DOWNLOAD_DIR))
 
     def resync_installed(self):
         from .watcher import sync_humble_install_status
@@ -91,6 +92,18 @@ class HumblePlugin:
                             {'type': 'status_output', 'key': 'main'},
                         ],
                     },
+                },
+                {
+                    'title': 'Games Folder',
+                    'items': [
+                        {'type': 'text', 'content': 'Where PlayDate installs Humble Bundle games.'},
+                        {'type': 'info_endpoint', 'endpoint': '/api/humble/games-dir-info'},
+                        {'type': 'buttons', 'items': [
+                            {'label': 'Set Folder…', 'action': {'type': 'call', 'fn': 'humblePickFolder'}},
+                            {'label': 'Open Folder', 'action': {'type': 'call', 'fn': 'humbleOpenFolder'}},
+                        ]},
+                        {'type': 'status_output', 'key': 'folder'},
+                    ],
                 },
             ],
         }

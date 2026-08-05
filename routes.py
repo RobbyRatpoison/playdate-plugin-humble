@@ -100,3 +100,14 @@ def set_test_limit():
         cache.pop('test_limit', None)
     _save_cache(cache)
     return jsonify({'status': 'ok', 'test_limit': cache.get('test_limit')})
+
+
+def _on_games_dir_change(path):
+    from .watcher import start_humble_watcher, stop_humble_watcher
+    stop_humble_watcher()
+    start_humble_watcher(path)
+
+
+from runners.installdir import register_install_dir_routes
+from .humble import HUMBLE_DOWNLOAD_DIR
+register_install_dir_routes(bp, 'humble', HUMBLE_DOWNLOAD_DIR, on_change=_on_games_dir_change)
