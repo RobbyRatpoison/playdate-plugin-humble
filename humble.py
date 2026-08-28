@@ -51,25 +51,86 @@ def _headers(cookie=None):
     }
 
 
-_GAME_PLATFORMS = {'windows', 'linux', 'mac', 'android'}
+# Desktop platforms only. Android APKs (Humble Mobile Bundle era) can't be
+# launched on desktop PlayDate, so an Android-only subproduct is not a game
+# here; 'audio'/'ebook'/'video'/'asmjs' were never in the set.
+_GAME_PLATFORMS = {'windows', 'linux', 'mac'}
 
 _NON_GAME_KEYWORDS = {
     'soundtrack', ' ost', 'original score', 'music pack',
     'artbook', 'art book', 'digital art', 'wallpaper',
     'comic', 'ebook', 'e-book', 'graphic novel',
     'documentary', 'making of',
+    'source code',          # Humble source-code bundle drops
+    'installer',            # Humble Software bundle installers ("CyberGhost VPN Installer", "Uplayinstaller")
 }
 
 
-def _is_game(subproduct):
-    has_game_download = any(
-        (d.get('platform') or '').lower() in _GAME_PLATFORMS
-        for d in subproduct.get('downloads', [])
-    )
-    if not has_game_download:
+def _payee_dev(sub):
+    """A subproduct's payee = who Humble pays for the sale. For a direct Widget
+    purchase that's the studio; for Humble Monthly / curated bundles it's Humble
+    itself ({'machine_name': 'humblebundle'}), which is not a developer. Return
+    the name only when it looks like a real payee."""
+    payee = sub.get('payee') or {}
+    if payee.get('machine_name') == 'humblebundle':
+        return ''
+    return (payee.get('human_name') or '').strip()
+
+
+def _looks_non_game(name):
+    n = (name or '').lower()
+    return any(kw in n for kw in _NON_GAME_KEYWORDS)
+
+
+def _is_software_bundle(order):
+    """True for a 'Humble Software Bundle' order (VEGAS Pro, etc.) -- these are
+    mostly desktop apps, not games."""
+    p = order.get('product') or {}
+    text = f"{p.get('human_name', '')} {p.get('machine_name', '')}".lower()
+    return 'software bundle' in text or 'softwarebundle' in text
+
+
+def _is_game(subproduct, order=None):
+    game_dls = [d for d in subproduct.get('downloads', [])
+                if (d.get('platform') or '').lower() in _GAME_PLATFORMS]
+    if not game_dls:
         return False
-    name = (subproduct.get('human_name') or '').lower()
-    return not any(kw in name for kw in _NON_GAME_KEYWORDS)
+    if _looks_non_game(subproduct.get('human_name')):
+        return False
+    # In a Humble *Software* bundle, an item whose only download is a bare
+    # "Installer" (no "Download" / platform-named struct) is a desktop app
+    # (MAGIX, Stardock Fences/DeskScapes), not a game. Confirmed against real
+    # orders: games use struct names like "Download" / "32-bit", never a lone
+    # "Installer". Scoped to software bundles so a rare game that legitimately
+    # ships as an installer elsewhere still imports.
+    if order and _is_software_bundle(order):
+        struct_names = {(ds.get('name') or '').strip().lower()
+                        for d in game_dls for ds in d.get('download_struct', [])}
+        if struct_names and struct_names <= {'installer'}:
+            return False
+    return True
+
+
+def _prune_non_games(db):
+    """Remove already-imported Humble rows that a tightened _is_game filter now
+    rejects (source code, software installers, ...), so a re-sync self-heals.
+    Only untouched rows -- nothing with playtime, an install, or a set status."""
+    rows = db.execute(
+        "SELECT appid, name FROM games WHERE platform='humble' "
+        "AND COALESCE(playtime_forever,0)=0 AND COALESCE(installed,0)=0 "
+        "AND COALESCE(completion_status,'Never Played')='Never Played' "
+        "AND (duplicate_of IS NULL OR duplicate_auto = 1)"  # auto-dedup only, not a manual choice
+    ).fetchall()
+    removed = 0
+    for r in rows:
+        if _looks_non_game(r['name']):
+            db.execute("DELETE FROM games WHERE appid=?", (r['appid'],))
+            removed += 1
+            log.info(f'Humble: pruned non-game {r["name"]!r}')
+    if removed:
+        db.commit()
+        log.info(f'Humble: pruned {removed} non-game entr{"y" if removed == 1 else "ies"}')
+    return removed
 
 
 def connect(cookie):
@@ -241,7 +302,7 @@ def _run_sync():
 
             order_machine_names = []
             for sub in order.get('subproducts', []):
-                if not _is_game(sub):
+                if not _is_game(sub, order):
                     continue
                 machine_name = (sub.get('machine_name') or '').strip()
                 if not machine_name:
@@ -257,7 +318,7 @@ def _run_sync():
                 name = (sub.get('human_name') or machine_name).strip()
                 # platform_slug stores gamekey/machine_name for the download URL
                 slug = f'{gamekey}/{machine_name}'
-                dev  = ((sub.get('payee') or {}).get('human_name') or '').strip()
+                dev  = _payee_dev(sub)
 
                 if machine_name in existing:
                     updated += 1
@@ -297,6 +358,7 @@ def _run_sync():
             gamekeys_map[gamekey] = order_machine_names
             time.sleep(0.2)
 
+        _prune_non_games(db)
         db.close()
         _save_cache({'gamekeys_map': gamekeys_map})
         _sync_state.update({
@@ -411,7 +473,7 @@ def rescrape(appid):
         if (sub.get('machine_name') or '').strip() != machine_name:
             continue
         name = (sub.get('human_name') or machine_name).strip()
-        dev  = ((sub.get('payee') or {}).get('human_name') or '').strip()
+        dev  = _payee_dev(sub)
         meta = {'meta_fetched': datetime.now(timezone.utc).date().isoformat()}
         if name:
             meta['name'] = name
@@ -421,6 +483,62 @@ def rescrape(appid):
         return meta
 
     return None
+
+
+def scan_junk():
+    """Re-check every imported Humble game against its order with the current
+    filters. Returns [{appid, name, reason}] for entries that now look like
+    non-games (source code, installers, soundtracks, dev builds, Android-only,
+    software-bundle apps) -- untouched rows only. [] if not connected."""
+    if not is_connected():
+        return []
+
+    db = get_db()
+    rows = db.execute(
+        "SELECT appid, name, platform_slug FROM games WHERE platform='humble' "
+        "AND platform_slug LIKE '%/%' "
+        "AND COALESCE(playtime_forever,0)=0 AND COALESCE(installed,0)=0 "
+        "AND COALESCE(completion_status,'Never Played')='Never Played' "
+        "AND (duplicate_of IS NULL OR duplicate_auto=1)"
+    ).fetchall()
+    db.close()
+
+    by_key = {}
+    for r in rows:
+        gk, _, mn = r['platform_slug'].partition('/')
+        if gk and mn:
+            by_key.setdefault(gk, []).append((r, mn))
+
+    out = []
+    hdr = _headers()
+    for gk, members in by_key.items():
+        try:
+            resp = requests.get(f'{HUMBLE_API}/order/{gk}', headers=hdr,
+                                timeout=20, allow_redirects=False)
+            if resp.status_code in (301, 302) or not resp.ok:
+                raise RuntimeError('session expired')
+            order = resp.json()
+        except Exception as e:
+            log.warning(f'Humble scan_junk: order {gk}: {e}')
+            continue
+        subs = {(s.get('machine_name') or '').strip(): s for s in order.get('subproducts', [])}
+        soft = _is_software_bundle(order)
+        for r, mn in members:
+            sub = subs.get(mn)
+            if sub is None:
+                continue
+            if _looks_non_game(sub.get('human_name') or r['name']):
+                reason = 'source code / installer / non-game'
+            elif not any((d.get('platform') or '').lower() in _GAME_PLATFORMS
+                         for d in sub.get('downloads', [])):
+                reason = 'no desktop download (Android / audio / ebook)'
+            elif not _is_game(sub, order):
+                reason = 'software-bundle application' if soft else 'not a game'
+            else:
+                continue
+            out.append({'appid': r['appid'], 'name': r['name'], 'reason': reason})
+        time.sleep(0.1)
+    return out
 
 
 # ── Download & launch ───────────────────────────────────────────────────────────

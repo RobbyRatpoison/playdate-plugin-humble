@@ -45,6 +45,10 @@ class HumblePlugin:
         from .humble import rescrape
         return rescrape(appid)
 
+    def scan_junk(self):
+        from .humble import scan_junk
+        return scan_junk()
+
     def js_api(self):
         return {
             'uninstall_url':  '/api/humble/uninstall/{appid}',
