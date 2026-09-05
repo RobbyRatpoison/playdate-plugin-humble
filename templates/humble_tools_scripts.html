@@ -1,3 +1,7 @@
+function _humbleChangeExecutable(appid) {
+    if (typeof pickExecutableForGame === 'function') pickExecutableForGame('humble', appid, null);
+}
+
 function humbleDownloadPoller(appid) {
     var iv = setInterval(function() {
         fetch('/api/humble/download-status/' + appid)

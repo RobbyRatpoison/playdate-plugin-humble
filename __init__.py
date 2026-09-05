@@ -56,6 +56,12 @@ class HumblePlugin:
             'scrape_method':  'POST',
             'appid_label':    'Humble ID:',
             'sync_label':     'Sync Humble Data',
+            'executable_candidates_url': '/api/humble/executable-candidates/{appid}',
+            'set_executable_url':        '/api/humble/set-executable/{appid}',
+            'context_menu_items': [
+                {'label': 'Change Executable', 'icon': '🎯', 'action_type': 'call',
+                 'js_fn': '_humbleChangeExecutable', 'visible_if': 'installed'},
+            ],
         }
 
     def manage_ui(self):

@@ -88,6 +88,31 @@ def uninstall(appid):
     return jsonify({'status': 'error', 'message': msg}), 500
 
 
+@bp.route('/executable-candidates/<int:appid>')
+def executable_candidates(appid):
+    from database import get_db
+    from runners.native_exe import scan_candidates
+    db  = get_db()
+    row = db.execute("SELECT install_path FROM games WHERE appid=?", (appid,)).fetchone()
+    db.close()
+    if not row or not row['install_path']:
+        return jsonify({'candidates': []})
+    c = scan_candidates(row['install_path'])
+    candidates = c['appimages'] + [rel for _r, _d, rel in c['natives']] + c['scripts'] + [rel for _d, rel in c['winexes']]
+    return jsonify({'candidates': candidates})
+
+
+@bp.route('/set-executable/<int:appid>', methods=['POST'])
+def set_executable(appid):
+    from database import update_game_data
+    data = request.get_json(silent=True) or {}
+    path = (data.get('path') or '').strip()
+    if not path:
+        return jsonify({'status': 'error', 'message': 'No path given'}), 400
+    update_game_data(appid, platform_executable=path)
+    return jsonify({'status': 'success'})
+
+
 @bp.route('/set-test-limit', methods=['POST'])
 def set_test_limit():
     from .humble import _load_cache, _save_cache

@@ -658,94 +658,6 @@ def _run_download(appid, url, filename, game_dir):
         log.error(f'Humble: download failed for appid {appid}: {e}')
 
 
-_SKIP_EXE_PREFIXES = ('setup', 'install', 'unins', 'uninst', 'redist')
-
-_HELPER_EXE_NAMES = {
-    'unitycrashhandler64', 'unitycrashhandler32', 'unitycrashhandler',
-    'unityplayer',
-    'dxsetup', 'dxwebsetup',
-    'vcredist_x64', 'vcredist_x86', 'vc_redist.x64', 'vc_redist.x86',
-    'dotnetfx', 'dotnet',
-}
-
-
-def _is_elf(path):
-    try:
-        with open(path, 'rb') as f:
-            return f.read(4) == b'\x7fELF'
-    except Exception:
-        return False
-
-
-def _is_macho(path):
-    try:
-        with open(path, 'rb') as f:
-            magic = f.read(4)
-            return magic in (b'\xfe\xed\xfa\xce', b'\xfe\xed\xfa\xcf',
-                             b'\xce\xfa\xed\xfe', b'\xcf\xfa\xed\xfe',
-                             b'\xca\xfe\xba\xbe')
-    except Exception:
-        return False
-
-
-def _find_executable(game_dir):
-    """
-    Walk game_dir and return (absolute_path, is_windows_exe).
-    Priority: AppImage > native ELF/Mach-O/script > .exe.
-    Returns (None, False) if nothing launchable is found.
-    """
-    is_windows = sys.platform == 'win32'
-    is_mac     = sys.platform == 'darwin'
-
-    # macOS: check for .app bundles first
-    if is_mac:
-        for entry in os.listdir(game_dir):
-            if entry.endswith('.app'):
-                app_path = os.path.join(game_dir, entry)
-                if os.path.isdir(app_path):
-                    macos_dir = os.path.join(app_path, 'Contents', 'MacOS')
-                    if os.path.isdir(macos_dir):
-                        for candidate in os.listdir(macos_dir):
-                            inner = os.path.join(macos_dir, candidate)
-                            if os.path.isfile(inner) and os.access(inner, os.X_OK):
-                                return inner, False
-                    return app_path, False
-
-    appimages, natives, scripts, winexes = [], [], [], []
-
-    for dirpath, dirs, filenames in os.walk(game_dir):
-        dirs[:] = [d for d in dirs if not d.startswith('.')]
-        for fname in filenames:
-            if fname.startswith('.'):
-                continue
-            fpath = os.path.join(dirpath, fname)
-            ext   = os.path.splitext(fname)[1].lower()
-            stem  = os.path.splitext(fname.lower())[0]
-            depth = fpath.count(os.sep)
-
-            if ext == '.appimage':
-                appimages.append((depth, fpath))
-            elif ext in ('.x86_64', '.x86', '.amd64', '.arm64', '.linux'):
-                natives.append((depth, fpath))
-            elif ext == '.sh' and not is_windows:
-                scripts.append((depth, fpath))
-            elif not ext and not is_windows and (_is_elf(fpath) or (is_mac and _is_macho(fpath))):
-                natives.append((depth, fpath))
-            elif ext == '.exe':
-                if any(stem.startswith(p) for p in _SKIP_EXE_PREFIXES):
-                    continue
-                if stem in _HELPER_EXE_NAMES:
-                    continue
-                winexes.append((depth, fpath))
-
-    for group in (appimages, natives, scripts):
-        if group:
-            return sorted(group)[0][1], False
-    if winexes:
-        return sorted(winexes)[0][1], True
-    return None, False
-
-
 def _open_folder(path):
     if sys.platform == 'win32':
         os.startfile(path)
@@ -775,10 +687,18 @@ def launch_game(appid):
             exe_abs  = cached_abs
             is_win   = cached.lower().endswith('.exe')
         else:
-            exe_abs, is_win = _find_executable(game_dir)
+            from runners.native_exe import pick_executable
+            picked = pick_executable(game_dir)
+            exe_abs = os.path.join(game_dir, picked['path']) if picked['path'] else None
+            is_win  = picked['is_windows']
             if exe_abs:
-                exe_rel = os.path.relpath(exe_abs, game_dir)
-                update_game_data(appid, platform_executable=exe_rel)
+                update_game_data(appid, platform_executable=picked['path'])
+                # Best guess is cached above so nothing regresses if the
+                # prompt is ignored -- this only ever offers a correction,
+                # never blocks the launch that triggered it.
+                if picked['ambiguous']:
+                    return {'status': 'needs_executable_pick', 'appid': appid,
+                            'candidates': picked['candidates']}
 
         if not exe_abs:
             _open_folder(game_dir)
