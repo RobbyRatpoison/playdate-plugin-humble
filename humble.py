@@ -51,6 +51,34 @@ def _headers(cookie=None):
     }
 
 
+def check_connection():
+    """True if Humble still accepts the stored cookie, False if it was rejected,
+    None if we couldn't tell. Humble re-issues the session cookie on every
+    authenticated response (a sliding ~3 month window), so the renewed value is
+    saved here; keeping the old one would let the connection lapse."""
+    cookie = _cfg().get('session_cookie')
+    if not cookie:
+        return False
+    try:
+        resp = requests.get(f'{HUMBLE_API}/user/order', headers=_headers(cookie),
+                            timeout=15, allow_redirects=False)
+    except requests.RequestException:
+        return None
+    if resp.status_code in (401, 403) or 300 <= resp.status_code < 400:
+        return False
+    if resp.status_code != 200:
+        return None
+    renewed = resp.cookies.get('_simpleauth_sess')
+    if renewed and renewed.strip('"') != cookie.strip('"'):
+        cfg = _cfg()
+        cfg['session_cookie'] = renewed
+        full = load_config() or {}
+        full['humble'] = cfg
+        _save_config_data(full)
+        log.info('Humble: saved renewed session cookie')
+    return True
+
+
 # Desktop platforms only. Android APKs (Humble Mobile Bundle era) can't be
 # launched on desktop PlayDate, so an Android-only subproduct is not a game
 # here; 'audio'/'ebook'/'video'/'asmjs' were never in the set.

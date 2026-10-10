@@ -32,9 +32,16 @@ def disconnect():
 @bp.route('/status')
 def status():
     from .humble import is_connected, get_username
+    import plugins
+    from .humble import check_connection
     connected = is_connected()
+    expired   = False
+    verify    = getattr(plugins, 'verify_connection', None)  # absent on older cores
+    if connected and verify and verify('humble', check_connection) is False:
+        connected, expired = False, True
     return jsonify({
         'connected': connected,
+        'expired':   expired,
         'username':  get_username() if connected else None,
     })
 
