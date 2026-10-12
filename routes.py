@@ -83,7 +83,21 @@ def scrape_single(appid):
         return jsonify({'status': 'error', 'message': 'Could not find this game in your Humble library'}), 502
 
     update_game_data(appid, **meta)
-    return jsonify({'status': 'success', 'data': meta})
+
+    # The purchase date too (an explicit sync of this one game, so overwriting is expected).
+    data_out = dict(meta)
+    try:
+        from .humble import fetch_dates_for_appids
+        from database import ts_to_date
+        got = []
+        fetch_dates_for_appids([appid], lambda a, ts: got.append(ts))
+        if got and got[0]:
+            update_game_data(appid, date_added=got[0])
+            data_out['date_added'] = ts_to_date(got[0]) or ''
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f'Humble scrape-single: purchase date for {appid} failed: {e}')
+    return jsonify({'status': 'success', 'data': data_out})
 
 
 @bp.route('/uninstall/<int:appid>', methods=['POST'])
